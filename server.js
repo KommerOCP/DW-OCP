@@ -3,8 +3,8 @@ const WebSocket = require('ws');
 const PORT = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port: PORT });
 
-// Track clients: Map<ws, { username, room }>
-const clients = new Map();
+const clients = new Map(); // ws -> { username, room, color }
+const roomPasswords = new Map();
 
 function broadcast(room, data, excludeWs = null) {
   const msg = JSON.stringify(data);
@@ -15,22 +15,25 @@ function broadcast(room, data, excludeWs = null) {
   }
 }
 
-function roomCount(room) {
-  let count = 0;
-  for (const [, info] of clients) {
-    if (info.room === room) count++;
-  }
-  return count;
-}
-
-function sendCount(room) {
-  const count = roomCount(room);
-  const msg = JSON.stringify({ type: 'count', count });
+function broadcastToRoom(room, data) {
+  const msg = JSON.stringify(data);
   for (const [ws, info] of clients) {
     if (info.room === room && ws.readyState === WebSocket.OPEN) {
       ws.send(msg);
     }
   }
+}
+
+function getUserList(room) {
+  const users = [];
+  for (const [, info] of clients) {
+    if (info.room === room) users.push({ username: info.username, color: info.color || '#00e5a0' });
+  }
+  return users;
+}
+
+function broadcastUserList(room) {
+  broadcastToRoom(room, { type: 'userlist', users: getUserList(room) });
 }
 
 wss.on('connection', (ws) => {
@@ -40,45 +43,45 @@ wss.on('connection', (ws) => {
     let data;
     try { data = JSON.parse(raw); } catch { return; }
 
-    const { type, username, room, text } = data;
+    const { type, username, room, text, password, color } = data;
 
     switch (type) {
-
       case 'join': {
-        clients.set(ws, { username, room });
+        if (roomPasswords.has(room)) {
+          if (roomPasswords.get(room) !== password) {
+            ws.send(JSON.stringify({ type: 'error', text: 'Wrong password.' }));
+            return;
+          }
+        } else if (password) {
+          roomPasswords.set(room, password);
+          console.log(`[lock] #${room} is now password protected`);
+        }
+        clients.set(ws, { username, room, color: color || '#00e5a0' });
         console.log(`[join] ${username} → #${room}`);
-
-        // Notify others in room
-        broadcast(room, {
-          type: 'system',
-          text: `${username} joined the room`
-        }, ws);
-
-        // Send count to everyone in room
-        sendCount(room);
+        broadcastUserList(room);
         break;
       }
 
       case 'message': {
         const info = clients.get(ws);
         if (!info) break;
-
         const safeText = String(text).slice(0, 500);
         console.log(`[msg] ${info.username} in #${info.room}: ${safeText}`);
-
-        // Echo to sender too
-        const payload = { type: 'message', username: info.username, text: safeText };
-        broadcast(info.room, payload);
+        broadcastToRoom(info.room, {
+          type: 'message',
+          username: info.username,
+          color: info.color || '#00e5a0',
+          text: safeText
+        });
         break;
       }
 
       case 'leave': {
         const info = clients.get(ws);
         if (!info) break;
-        console.log(`[leave] ${info.username} left #${info.room}`);
-        broadcast(info.room, { type: 'system', text: `${info.username} left the room` }, ws);
         clients.delete(ws);
-        sendCount(info.room);
+        broadcastUserList(info.room);
+        console.log(`[leave] ${info.username} left #${info.room}`);
         break;
       }
     }
@@ -87,12 +90,9 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     const info = clients.get(ws);
     if (info) {
-      console.log(`[-] ${info.username} disconnected from #${info.room}`);
       clients.delete(ws);
-      broadcast(info.room, { type: 'system', text: `${info.username} disconnected` });
-      sendCount(info.room);
-    } else {
-      console.log(`[-] Anonymous connection closed`);
+      broadcastUserList(info.room);
+      console.log(`[-] ${info.username} disconnected`);
     }
   });
 
