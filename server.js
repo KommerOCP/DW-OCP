@@ -95,8 +95,19 @@ function broadcastDWCounts() {
     if (info.authenticated && ws.readyState === WebSocket.OPEN) ws.send(msg);
 }
 
+// ── Guild boss alert cooldowns (shared across all guild members) ───
+// Key: `${roomId}::${bossKey}` → last broadcast timestamp
+const guildBossCooldowns = new Map();
+const BOSS_ALERT_COOLDOWN = 2 * 60 * 1000; // 2 minutes
+
+// Periodically purge expired entries
+setInterval(() => {
+  const cutoff = Date.now() - BOSS_ALERT_COOLDOWN;
+  for (const [key, ts] of guildBossCooldowns)
+    if (ts < cutoff) guildBossCooldowns.delete(key);
+}, BOSS_ALERT_COOLDOWN);
+
 function findAccount(username) {
-  // Case-insensitive lookup; returns the stored key or null
   const lower = username?.trim().toLowerCase();
   return Object.keys(accounts).find(k => k.toLowerCase() === lower) || null;
 }
@@ -295,14 +306,25 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // ── Boss alert (broadcast from game page scanner) ──────
+      // ── Boss alert (shared guild cooldown — first trigger wins) ──
       case 'boss_alert': {
         const info = clients.get(ws);
         if (!info?.authenticated || !info.room) break;
-        const safeText = String(text).slice(0, 300);
-        const ts = Date.now();
-        broadcastToRoom(info.room, { type: 'boss_alert', username: info.username, text: safeText, ts });
-        console.log(`[boss-alert] ${info.username}: ${safeText}`);
+        // Only allowed in actual guild rooms, not DW rooms or lobby
+        if (!guildRooms.has(info.room)) break;
+
+        const safeText   = String(data.text    || '').slice(0, 300);
+        const safeBossKey = String(data.bossKey || safeText).slice(0, 100);
+        const cdKey = `${info.room}::${safeBossKey}`;
+        const now = Date.now();
+
+        // If another guild member already announced this boss within 2 min, silently drop
+        if ((now - (guildBossCooldowns.get(cdKey) || 0)) < BOSS_ALERT_COOLDOWN) break;
+
+        guildBossCooldowns.set(cdKey, now);
+        broadcastToRoom(info.room, { type: 'boss_alert', text: safeText, ts: now });
+        const room = guildRooms.get(info.room);
+        console.log(`[boss-alert] "${room?.name}" — ${info.username}: ${safeText}`);
         break;
       }
 
