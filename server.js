@@ -28,6 +28,7 @@ function generateToken() { return crypto.randomBytes(32).toString('hex'); }
 // ── Runtime state ──────────────────────────────────────────────
 const clients       = new Map(); // ws -> { username, room, color, authenticated }
 const guildRooms    = new Map(); // roomId -> { name, password, lastActivity }
+const guildZoneTrackers = new Map(); // roomId -> { zoneName: { hp, rage, ts, by } }
 const MAX_GUILD_ROOMS = 10;
 const GUILD_TTL       = 7 * 24 * 60 * 60 * 1000;
 const GUILD_LOBBY     = '__guild_lobby__';
@@ -302,6 +303,10 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'guild_joined', roomId, roomName: gr.name }));
         broadcastUserList(roomId);
         broadcastGuildRoomList();
+        // Send current zone tracker state to the joining member
+        if (guildZoneTrackers.has(roomId)) {
+          ws.send(JSON.stringify({ type:'zone_tracker', zones: guildZoneTrackers.get(roomId) }));
+        }
         console.log(`[guild-join] ${info.username} → "${gr.name}"`);
         break;
       }
@@ -325,6 +330,28 @@ wss.on('connection', (ws) => {
         broadcastToRoom(info.room, { type: 'boss_alert', text: safeText, ts: now });
         const room = guildRooms.get(info.room);
         console.log(`[boss-alert] "${room?.name}" — ${info.username}: ${safeText}`);
+        break;
+      }
+
+      // ── Zone tracker update (live Olympus zone data) ──────
+      case 'zone_update': {
+        const info = clients.get(ws);
+        if (!info?.authenticated || !guildRooms.has(info.room)) break;
+        const zones = data.zones;
+        if (!zones || typeof zones !== 'object') break;
+        if (!guildZoneTrackers.has(info.room)) guildZoneTrackers.set(info.room, {});
+        const tracker = guildZoneTrackers.get(info.room);
+        const now = Date.now();
+        for (const [zone, status] of Object.entries(zones)) {
+          const safeZone = String(zone).slice(0, 20);
+          tracker[safeZone] = {
+            hp:   typeof status.hp   === 'number' ? Math.floor(status.hp)                    : null,
+            rage: typeof status.rage === 'number' ? Math.min(100, Math.max(0, status.rage)) : null,
+            ts: now,
+            by: info.username
+          };
+        }
+        broadcastToRoom(info.room, { type:'zone_tracker', zones: tracker });
         break;
       }
 
