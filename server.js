@@ -189,10 +189,13 @@ wss.on('connection', (ws) => {
           ws.send(JSON.stringify({ type: 'auth_fail', text: 'Not authenticated.' }));
           break;
         }
+        const oldRoom = info.room;
         const newColor = color || info.color || '#00e5a0';
         clients.set(ws, { ...info, room, color: newColor });
+        // If switching rooms, update the old room's count too
+        if (oldRoom && oldRoom !== room) broadcastUserList(oldRoom);
         broadcastUserList(room);
-        if (DW_ROOMS.includes(room)) broadcastDWCounts();
+        if (DW_ROOMS.includes(room) || (oldRoom && DW_ROOMS.includes(oldRoom))) broadcastDWCounts();
         break;
       }
 
@@ -289,6 +292,17 @@ wss.on('connection', (ws) => {
         broadcastUserList(roomId);
         broadcastGuildRoomList();
         console.log(`[guild-join] ${info.username} → "${gr.name}"`);
+        break;
+      }
+
+      // ── Boss alert (broadcast from game page scanner) ──────
+      case 'boss_alert': {
+        const info = clients.get(ws);
+        if (!info?.authenticated || !info.room) break;
+        const safeText = String(text).slice(0, 300);
+        const ts = Date.now();
+        broadcastToRoom(info.room, { type: 'boss_alert', username: info.username, text: safeText, ts });
+        console.log(`[boss-alert] ${info.username}: ${safeText}`);
         break;
       }
 
