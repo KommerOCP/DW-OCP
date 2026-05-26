@@ -72,6 +72,29 @@ function broadcastGuildRoomList() {
 
 function makeRoomId() { return 'guild_' + Math.random().toString(36).slice(2, 9); }
 
+// ── DW room count helpers ──────────────────────────────────────
+const DW_ROOMS = [
+  'dw-global-1','dw-global-2','dw-global-3','dw-global-4',
+  'dw-global-5','dw-global-6','dw-global-7','dw-global-8',
+];
+function getDWCounts() {
+  const counts = {};
+  for (const room of DW_ROOMS)
+    counts[room] = [...clients.values()].filter(c => c.room === room).length;
+  return counts;
+}
+// Send current DW counts to one socket
+function sendDWCounts(ws) {
+  if (ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ type: 'room_counts', counts: getDWCounts() }));
+}
+// Broadcast updated DW counts to every authenticated socket
+function broadcastDWCounts() {
+  const msg = JSON.stringify({ type: 'room_counts', counts: getDWCounts() });
+  for (const [ws, info] of clients)
+    if (info.authenticated && ws.readyState === WebSocket.OPEN) ws.send(msg);
+}
+
 function findAccount(username) {
   // Case-insensitive lookup; returns the stored key or null
   const lower = username?.trim().toLowerCase();
@@ -126,6 +149,7 @@ wss.on('connection', (ws) => {
         sessions.set(tok, uname);
         clients.set(ws, { ...info, username: uname, authenticated: true });
         ws.send(JSON.stringify({ type: 'auth_ok', token: tok, username: uname }));
+        sendDWCounts(ws);
         console.log(`[register] ${uname}`);
         break;
       }
@@ -141,6 +165,7 @@ wss.on('connection', (ws) => {
         sessions.set(tok, key);
         clients.set(ws, { ...info, username: key, authenticated: true });
         ws.send(JSON.stringify({ type: 'auth_ok', token: tok, username: key }));
+        sendDWCounts(ws);
         console.log(`[login] ${key}`);
         break;
       }
@@ -154,6 +179,7 @@ wss.on('connection', (ws) => {
         }
         clients.set(ws, { ...info, username: uname, authenticated: true });
         ws.send(JSON.stringify({ type: 'auth_ok', username: uname }));
+        sendDWCounts(ws);
         break;
       }
 
@@ -166,6 +192,7 @@ wss.on('connection', (ws) => {
         const newColor = color || info.color || '#00e5a0';
         clients.set(ws, { ...info, room, color: newColor });
         broadcastUserList(room);
+        if (DW_ROOMS.includes(room)) broadcastDWCounts();
         break;
       }
 
@@ -284,6 +311,7 @@ wss.on('connection', (ws) => {
       clients.delete(ws);
       if (info.room && info.room !== GUILD_LOBBY) {
         broadcastUserList(info.room);
+        if (DW_ROOMS.includes(info.room)) broadcastDWCounts();
         if (guildRooms.has(info.room)) broadcastGuildRoomList();
       }
       if (info.username) console.log(`[-] ${info.username} disconnected`);
