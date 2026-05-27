@@ -73,6 +73,11 @@ function broadcastGuildRoomList() {
 
 function makeRoomId() { return 'guild_' + Math.random().toString(36).slice(2, 9); }
 
+function formatHP(hp) {
+  if (hp >= 1e9) return (hp / 1e9).toFixed(2) + 'B';
+  return Math.round(hp / 1e6) + 'M';
+}
+
 // ── DW room count helpers ──────────────────────────────────────
 const DW_ROOMS = [
   'dw-global-1','dw-global-2','dw-global-3','dw-global-4',
@@ -342,16 +347,35 @@ wss.on('connection', (ws) => {
         if (!guildZoneTrackers.has(info.room)) guildZoneTrackers.set(info.room, {});
         const tracker = guildZoneTrackers.get(info.room);
         const now = Date.now();
+
         for (const [zone, status] of Object.entries(zones)) {
-          const safeZone = String(zone).slice(0, 20);
+          const safeZone   = String(zone).slice(0, 20);
+          const prev       = tracker[safeZone];
+          const event      = status.event || 'update';
+          const prevState  = prev?.bossState || 'unknown';
+
+          if (event === 'new_boss') {
+            if (prevState !== 'boss') {
+              // Genuinely new boss — announce to guild chat
+              const hp = status.hp ? formatHP(status.hp) : '?';
+              broadcastToRoom(info.room, { type: 'system', text: `🐉 New boss in ${safeZone}! HP: ${hp}` });
+            }
+            // If prevState === 'boss': already alerted (multi-client), silent HP update
+          } else if (event === 'defeated' && prevState === 'boss') {
+            broadcastToRoom(info.room, { type: 'system', text: `💀 Boss defeated in ${safeZone}!` });
+          }
+
           tracker[safeZone] = {
-            hp:   typeof status.hp   === 'number' ? Math.floor(status.hp)                    : null,
-            rage: typeof status.rage === 'number' ? Math.min(100, Math.max(0, status.rage)) : null,
+            hp:        typeof status.hp   === 'number' ? Math.floor(status.hp)                    : null,
+            rage:      typeof status.rage === 'number' ? Math.min(100, Math.max(0, status.rage)) : null,
+            bossId:    status.bossId  || null,
+            bossState: status.hp ? 'boss' : status.rage ? 'raging' : 'clear',
             ts: now,
             by: info.username
           };
         }
-        broadcastToRoom(info.room, { type:'zone_tracker', zones: tracker });
+
+        broadcastToRoom(info.room, { type: 'zone_tracker', zones: tracker });
         break;
       }
 
