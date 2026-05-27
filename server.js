@@ -9,16 +9,55 @@ const ACCOUNTS_FILE = path.join(__dirname, 'accounts.json');
 const SALT_ROUNDS  = 10;
 
 // ── Account storage ────────────────────────────────────────────
-// NOTE: accounts.json persists across restarts but resets on Railway redeploy.
-// For permanent storage, add a PostgreSQL/MongoDB addon to your Railway project.
+// Uses MongoDB when MONGODB_URI env var is set (production),
+// falls back to accounts.json for local development.
 let accounts = {};
-try {
-  if (fs.existsSync(ACCOUNTS_FILE))
-    accounts = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8'));
-} catch { accounts = {}; }
+let mongoCollection = null;
 
-function saveAccounts() {
-  try { fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2)); } catch {}
+async function initStorage() {
+  if (process.env.MONGODB_URI) {
+    try {
+      const { MongoClient } = require('mongodb');
+      const client = new MongoClient(process.env.MONGODB_URI);
+      await client.connect();
+      const db = client.db('livechat');
+      mongoCollection = db.collection('accounts');
+      // Load all accounts into memory for fast lookups
+      const docs = await mongoCollection.find({}).toArray();
+      for (const doc of docs) {
+        accounts[doc.username] = { hash: doc.hash, createdAt: doc.createdAt };
+      }
+      console.log(`✅  MongoDB connected — ${docs.length} accounts loaded`);
+    } catch (err) {
+      console.error('❌  MongoDB connection failed:', err.message);
+      console.log('⚠️   Falling back to accounts.json');
+      loadFileAccounts();
+    }
+  } else {
+    loadFileAccounts();
+    console.log('ℹ️   No MONGODB_URI set — using accounts.json (local mode)');
+  }
+}
+
+function loadFileAccounts() {
+  try {
+    if (fs.existsSync(ACCOUNTS_FILE))
+      accounts = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8'));
+  } catch { accounts = {}; }
+}
+
+async function saveAccounts(username, data) {
+  if (mongoCollection) {
+    // Upsert this single account into MongoDB
+    await mongoCollection.updateOne(
+      { username },
+      { $set: { username, hash: data.hash, createdAt: data.createdAt } },
+      { upsert: true }
+    );
+  } else {
+    // File fallback
+    try { fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2)); } catch {}
+  }
 }
 
 // ── Sessions ───────────────────────────────────────────────────
@@ -132,8 +171,8 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
-// ── Server ─────────────────────────────────────────────────────
-const wss = new WebSocket.Server({ port: PORT });
+initStorage().then(() => {
+  const wss = new WebSocket.Server({ port: PORT });
 
 wss.on('connection', (ws) => {
   console.log(`[+] New connection (total: ${wss.clients.size})`);
@@ -163,7 +202,7 @@ wss.on('connection', (ws) => {
         }
         const hash = bcrypt.hashSync(password, SALT_ROUNDS);
         accounts[uname] = { hash, createdAt: Date.now() };
-        saveAccounts();
+        saveAccounts(uname, accounts[uname]);
         const tok = generateToken();
         sessions.set(tok, uname);
         clients.set(ws, { ...info, username: uname, authenticated: true });
@@ -249,7 +288,7 @@ wss.on('connection', (ws) => {
           break;
         }
         account.hash = bcrypt.hashSync(newPassword, SALT_ROUNDS);
-        saveAccounts();
+        saveAccounts(info.username, account);
         // Invalidate all old sessions for this user, issue a new one
         for (const [tok, uname] of sessions) if (uname === info.username) sessions.delete(tok);
         const newTok = generateToken();
@@ -423,4 +462,5 @@ wss.on('connection', (ws) => {
   ws.on('error', (err) => { console.error('[error]', err.message); clients.delete(ws); });
 });
 
-console.log(`✅  Server running on port ${PORT}`);
+  console.log(`✅  Server running on port ${PORT}`);
+});
