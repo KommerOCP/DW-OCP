@@ -28,7 +28,9 @@ function generateToken() { return crypto.randomBytes(32).toString('hex'); }
 // ── Runtime state ──────────────────────────────────────────────
 const clients       = new Map(); // ws -> { username, room, color, authenticated }
 const guildRooms    = new Map(); // roomId -> { name, password, lastActivity }
-const guildZoneTrackers = new Map(); // roomId -> { zoneName: { hp, rage, ts, by } }
+const guildZoneTrackers    = new Map(); // roomId -> { zoneName: { hp, rage, ts, by } }
+const guildZoneEventHistory = new Map(); // roomId -> [{ text, ts }, ...]
+const ZONE_EVENT_HISTORY_MAX = 50;
 const MAX_GUILD_ROOMS = 10;
 const GUILD_TTL       = 7 * 24 * 60 * 60 * 1000;
 const GUILD_LOBBY     = '__guild_lobby__';
@@ -312,6 +314,13 @@ wss.on('connection', (ws) => {
         if (guildZoneTrackers.has(roomId)) {
           ws.send(JSON.stringify({ type:'zone_tracker', zones: guildZoneTrackers.get(roomId) }));
         }
+        // Send recent zone event history so they can see what was announced while away
+        if (guildZoneEventHistory.has(roomId)) {
+          const history = guildZoneEventHistory.get(roomId);
+          for (const evt of history) {
+            ws.send(JSON.stringify({ type: 'zone_event', text: evt.text, ts: evt.ts }));
+          }
+        }
         console.log(`[guild-join] ${info.username} → "${gr.name}"`);
         break;
       }
@@ -344,25 +353,31 @@ wss.on('connection', (ws) => {
         if (!info?.authenticated || !guildRooms.has(info.room)) break;
         const zones = data.zones;
         if (!zones || typeof zones !== 'object') break;
-        if (!guildZoneTrackers.has(info.room)) guildZoneTrackers.set(info.room, {});
+        if (!guildZoneTrackers.has(info.room))    guildZoneTrackers.set(info.room, {});
+        if (!guildZoneEventHistory.has(info.room)) guildZoneEventHistory.set(info.room, []);
         const tracker = guildZoneTrackers.get(info.room);
+        const history = guildZoneEventHistory.get(info.room);
         const now = Date.now();
 
         for (const [zone, status] of Object.entries(zones)) {
-          const safeZone   = String(zone).slice(0, 20);
-          const prev       = tracker[safeZone];
-          const event      = status.event || 'update';
-          const prevState  = prev?.bossState || 'unknown';
+          const safeZone  = String(zone).slice(0, 20);
+          const prev      = tracker[safeZone];
+          const event     = status.event || 'update';
+          const prevState = prev?.bossState || 'unknown';
 
-          if (event === 'new_boss') {
-            if (prevState !== 'boss') {
-              // Genuinely new boss — announce to guild chat
-              const hp = status.hp ? formatHP(status.hp) : '?';
-              broadcastToRoom(info.room, { type: 'system', text: `🐉 New boss in ${safeZone}! HP: ${hp}` });
-            }
-            // If prevState === 'boss': already alerted (multi-client), silent HP update
+          let eventText = null;
+          if (event === 'new_boss' && prevState !== 'boss') {
+            const hp = status.hp ? formatHP(status.hp) : '?';
+            eventText = `New boss in ${safeZone}! HP: ${hp}`;
           } else if (event === 'defeated' && prevState === 'boss') {
-            broadcastToRoom(info.room, { type: 'system', text: `💀 Boss defeated in ${safeZone}!` });
+            eventText = `Boss defeated in ${safeZone}!`;
+          }
+
+          if (eventText) {
+            const evt = { text: eventText, ts: now };
+            history.push(evt);
+            if (history.length > ZONE_EVENT_HISTORY_MAX) history.shift();
+            broadcastToRoom(info.room, { type: 'zone_event', text: eventText, ts: now });
           }
 
           tracker[safeZone] = {
