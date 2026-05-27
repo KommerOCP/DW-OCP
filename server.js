@@ -406,8 +406,7 @@ wss.on('connection', (ws) => {
 
           let eventText = null;
           if (event === 'new_boss' && prevState !== 'boss') {
-            const hp = status.hp ? formatHP(status.hp) : '?';
-            eventText = `New boss in ${safeZone}! HP: ${hp}`;
+            eventText = `New boss in ${safeZone}!`;
           } else if (event === 'defeated' && prevState === 'boss') {
             eventText = `Boss defeated in ${safeZone}!`;
           }
