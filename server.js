@@ -119,6 +119,26 @@ function formatHP(hp) {
   return Math.round(hp / 1e6) + 'M';
 }
 
+async function postToDiscord(text, isNewBoss) {
+  if (!process.env.DISCORD_WEBHOOK_URL) return;
+  try {
+    await fetch(process.env.DISCORD_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: 'DW Boss Tracker',
+        embeds: [{
+          description: text,
+          color: isNewBoss ? 0xFF6600 : 0x4CAF50,
+          timestamp: new Date().toISOString()
+        }]
+      })
+    });
+  } catch (err) {
+    console.warn('Discord webhook failed:', err.message);
+  }
+}
+
 // ── DW room count helpers ──────────────────────────────────────
 const DW_ROOMS = [
   'dw-global-1','dw-global-2','dw-global-3','dw-global-4',
@@ -405,8 +425,10 @@ wss.on('connection', (ws) => {
           const prevState = prev?.bossState || 'unknown';
 
           let eventText = null;
+          let isNewBoss = false;
           if (event === 'new_boss' && prevState !== 'boss') {
             eventText = `New boss in ${safeZone}!`;
+            isNewBoss = true;
           } else if (event === 'defeated' && prevState === 'boss') {
             eventText = `Boss defeated in ${safeZone}!`;
           }
@@ -416,6 +438,7 @@ wss.on('connection', (ws) => {
             history.push(evt);
             if (history.length > ZONE_EVENT_HISTORY_MAX) history.shift();
             broadcastToRoom(info.room, { type: 'zone_event', text: eventText, ts: now });
+            postToDiscord(eventText, isNewBoss);
           }
 
           tracker[safeZone] = {
