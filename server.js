@@ -119,23 +119,88 @@ function formatHP(hp) {
   return Math.round(hp / 1e6) + 'M';
 }
 
-async function postToDiscord(text, isNewBoss) {
-  if (!process.env.DISCORD_WEBHOOK_URL) return;
+// ── Discord bot ────────────────────────────────────────────────
+let discordChannel = null;
+
+async function initDiscord() {
+  if (!process.env.DISCORD_BOT_TOKEN || !process.env.DISCORD_CHANNEL_ID) {
+    console.log('ℹ️   No DISCORD_BOT_TOKEN/DISCORD_CHANNEL_ID — Discord bot disabled');
+    return;
+  }
   try {
-    await fetch(process.env.DISCORD_WEBHOOK_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: 'DW Boss Tracker',
-        embeds: [{
-          description: text,
-          color: isNewBoss ? 0xFF6600 : 0x4CAF50,
-          timestamp: new Date().toISOString()
-        }]
-      })
+    const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+    const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+    client.once('ready', async () => {
+      console.log(`✅  Discord bot logged in as ${client.user.tag}`);
+      discordChannel = await client.channels.fetch(process.env.DISCORD_CHANNEL_ID);
+
+      // Register /zones slash command
+      const commands = [
+        new SlashCommandBuilder()
+          .setName('zones')
+          .setDescription('Show current Olympus zone boss status')
+      ].map(c => c.toJSON());
+
+      const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
+      // Guild-specific = instant; global = up to 1hr. Use guild if DISCORD_GUILD_ID is set.
+      if (process.env.DISCORD_GUILD_ID) {
+        await rest.put(Routes.applicationGuildCommands(client.user.id, process.env.DISCORD_GUILD_ID), { body: commands });
+      } else {
+        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+      }
+      console.log('✅  Discord slash commands registered');
     });
+
+    client.on('interactionCreate', async interaction => {
+      if (!interaction.isChatInputCommand() || interaction.commandName !== 'zones') return;
+      const { EmbedBuilder: EB } = require('discord.js');
+      const ZONES = ['Olympus 1A','Olympus 2A','Olympus 3A','Olympus 1B','Olympus 2B','Olympus 3B'];
+
+      // Merge data from all guild rooms, preferring most recent
+      const merged = {};
+      for (const tracker of guildZoneTrackers.values()) {
+        for (const [zone, d] of Object.entries(tracker)) {
+          if (!merged[zone] || d.ts > merged[zone].ts) merged[zone] = d;
+        }
+      }
+
+      const embed = new EB()
+        .setTitle('Olympus Zone Status')
+        .setColor(0x9980cc)
+        .setTimestamp();
+
+      for (const zone of ZONES) {
+        const d = merged[zone];
+        let val = '—';
+        if (d) {
+          if (d.hp)               val = `🔴 HP: ${formatHP(d.hp)}`;
+          else if (d.rage > 0)    val = `⚡ Rage: ${d.rage}%`;
+          else                    val = '✅ Clear';
+        }
+        embed.addFields({ name: zone, value: val, inline: true });
+      }
+
+      await interaction.reply({ embeds: [embed] });
+    });
+
+    await client.login(process.env.DISCORD_BOT_TOKEN);
   } catch (err) {
-    console.warn('Discord webhook failed:', err.message);
+    console.warn('⚠️  Discord bot failed to start:', err.message);
+  }
+}
+
+async function postToDiscord(text, isNewBoss) {
+  if (!discordChannel) return;
+  try {
+    const { EmbedBuilder } = require('discord.js');
+    const embed = new EmbedBuilder()
+      .setDescription(text)
+      .setColor(isNewBoss ? 0xFF6600 : 0x4CAF50)
+      .setTimestamp();
+    await discordChannel.send({ embeds: [embed] });
+  } catch (err) {
+    console.warn('Discord post failed:', err.message);
   }
 }
 
@@ -192,6 +257,7 @@ setInterval(() => {
 }, 60 * 60 * 1000);
 
 initStorage().then(() => {
+  initDiscord();
   const wss = new WebSocket.Server({ port: PORT });
 
 wss.on('connection', (ws) => {
